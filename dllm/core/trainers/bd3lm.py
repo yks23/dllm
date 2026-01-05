@@ -174,11 +174,7 @@ class BD3LMTrainer(MDLMTrainer):
             from torch.nn.attention.flex_attention import create_block_mask
 
             attention_mask = create_block_mask(
-                partial(
-                    _create_bd3lm_attention_mask, 
-                    block_size=self.block_size, 
-                    n=l
-                ),
+                partial(_create_bd3lm_attention_mask, block_size=self.block_size, n=l),
                 B=None,
                 H=None,
                 Q_LEN=l * 2,

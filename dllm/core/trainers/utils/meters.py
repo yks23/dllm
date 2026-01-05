@@ -59,7 +59,9 @@ class BaseMetricsCallback(transformers.TrainerCallback):
         mc = self._m[split]
         mc.to(self.accelerator.device)
 
-        computed = mc.compute()  # torchmetrics will sync here if metric is configured to do so
+        computed = (
+            mc.compute()
+        )  # torchmetrics will sync here if metric is configured to do so
         mc.reset()
 
         return {

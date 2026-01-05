@@ -654,9 +654,7 @@ def test_a2d_fullmask_future_affects_past(model_name_or_path, config_cls, model_
         ),
     ],
 )
-def test_bd3lm_attention_kvcache_equivalence(
-    model_name_or_path, config_cls, model_cls
-):
+def test_bd3lm_attention_kvcache_equivalence(model_name_or_path, config_cls, model_cls):
     """
     Verify that attention produces identical logits when run:
         (A) in one full 8-token forward pass
