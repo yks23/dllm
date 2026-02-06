@@ -22,6 +22,11 @@ Resources and examples for training (finetuning & pretraining) and evaluating di
 # pipeline modules relevant with Dream
 dllm/pipelines/dream
 ├── __init__.py                     # Package initialization
+├── fastdllm/
+│   ├── configuration_dream.py  # Fast-dLLM Dream model configuration
+│   ├── modeling_dream.py       # Fast-dLLM Dream model architecture
+│   ├── sampler.py              # Fast-dLLM inference module
+│   └── eval.py                 # Fast-dLLM evaluation module
 ├── models/
 │   ├── configuration_dream.py      # Dream model configuration
 │   ├── generation_utils.py         # Diffusion-based generation logic
@@ -36,6 +41,9 @@ dllm/pipelines/dream
 examples/dream
 ├── chat.py                         # Interactive inference example
 ├── eval.sh                         # Automatic evaluation example
+├── fastdllm/
+│   ├── eval.sh                      # Fast-dLLM evaluation example
+│   └── sample.py                    # Fast-dLLM inference example
 ├── sample.py                       # Inference example
 ├── pt.py                           # Pretraining example
 ├── README.md                       # Documentation (you are here)
@@ -135,6 +143,10 @@ We also support interactive multi-turn dialogue with visualization:
 ```shell
 python examples/dream/chat.py --model_name_or_path "Dream-org/Dream-v0-Instruct-7B"
 ```
+We support [Fast-dLLM](https://github.com/NVlabs/Fast-dLLM) sampling:
+```shell
+python examples/dream/fastdllm/sample.py --model_name_or_path "Dream-org/Dream-v0-Instruct-7B" --use_cache prefix --alg confidence_threshold --threshold 0.9
+````
 
 ## Evaluation  
 > Read [(optional) Evaluation setup](/README.md/#optional-evaluation-setup) before running evaluation. 
@@ -155,6 +167,11 @@ To automatically evaluate [`Dream-v0-Base-7B`](https://huggingface.co/Dream-org/
 ```shell
 bash examples/dream/eval.sh --model_name_or_path "Dream-org/Dream-v0-Instruct-7B" --instruct True
 bash examples/dream/eval.sh --model_name_or_path "Dream-org/Dream-v0-Base-7B" --instruct False
+```
+
+Fast-dLLM is supported for evaluation. To evaluate [`Dream-v0-Instruct-7B`](https://huggingface.co/Dream-org/Dream-v0-Instruct-7B) with the Fast-dLLM sampler, run:
+```shell
+bash examples/dream/fastdllm/eval.sh --model_name_or_path "Dream-org/Dream-v0-Instruct-7B" --instruct True
 ```
 
 ### Evaluation results

@@ -1,7 +1,7 @@
 """
 accelerate launch \
     --num_processes 4 \
-    dllm/pipelines/dream/eval.py \
+    dllm/pipelines/dream/fastdllm/eval.py \
     --tasks gsm8k_cot \
     --model dream \
     --apply_chat_template \
@@ -24,13 +24,17 @@ from lm_eval.models.utils import get_dtype
 from tqdm import tqdm
 
 import dllm
-from dllm.pipelines.dream import DreamSampler, DreamSamplerConfig
+from dllm.pipelines.dream.fastdllm import (
+    DreamFastdLLMSampler,
+    DreamFastdLLMSamplerConfig,
+    DreamFastdLLMConfig,
+)
 
 eval_logger = logging.getLogger(__name__)
 
 
 @dataclass
-class DreamEvalConfig(DreamSamplerConfig):
+class DreamEvalConfig(DreamFastdLLMSamplerConfig):
     top_p: float | None = None
     top_k: float | None = None
     max_new_tokens: int = 128
@@ -87,6 +91,9 @@ class DreamEvalHarness(LM):
         alg = kwargs.get("alg", config.alg)
         alg_temp = kwargs.get("alg_temp", config.alg_temp)
         escape_until = kwargs.get("escape_until", config.escape_until)
+        use_cache = kwargs.get("use_cache", config.use_cache)
+        block_size = kwargs.get("block_size", config.block_size)
+        threshold = kwargs.get("threshold", config.threshold)
 
         accelerator = accelerate.Accelerator()
 
@@ -102,8 +109,10 @@ class DreamEvalHarness(LM):
 
         # Use accelerator for device placement
         pretrained = dllm.utils.resolve_with_base_env(pretrained, "BASE_MODELS_DIR")
+        fast_config = DreamFastdLLMConfig.from_pretrained(pretrained)
         self.model = dllm.utils.get_model(
-            SimpleNamespace(model_name_or_path=pretrained, dtype=get_dtype(dtype))
+            SimpleNamespace(model_name_or_path=pretrained, dtype=get_dtype(dtype)),
+            config=fast_config,
         )
         self.model.eval()
 
@@ -137,6 +146,9 @@ class DreamEvalHarness(LM):
         self.alg = alg
         self.alg_temp = alg_temp
         self.escape_until = escape_until
+        self.use_cache = use_cache
+        self.block_size = block_size
+        self.threshold = threshold
 
         # loglikelihood params
         self.nll_type = nll_type
@@ -144,6 +156,9 @@ class DreamEvalHarness(LM):
         self.mc_num = mc_num
         self.classifier_free_guidance = classifier_free_guidance
         self.sampling_eps = sampling_eps
+
+        # initialize sampler
+        self.sampler = DreamFastdLLMSampler(model=self.model, tokenizer=self.tokenizer)
 
     @property
     def rank(self):
@@ -203,7 +218,6 @@ class DreamEvalHarness(LM):
             disable=(disable_tqdm or (self.rank != 0)),
             desc="Running generate_until requests",
         )
-        sampler = DreamSampler(model=self.model, tokenizer=self.tokenizer)
         for batch_idx in range(0, len(requests), self.batch_size):
             batch_requests = requests[batch_idx : batch_idx + self.batch_size]
             contexts, gen_args = zip(*[req.args for req in batch_requests])
@@ -231,7 +245,7 @@ class DreamEvalHarness(LM):
                 prompt_ids = [p_id[-cutoff_len:] for p_id in prompt_ids]
 
             # generation
-            generation_ids = sampler.sample(
+            generation_ids = self.sampler.sample(
                 max_new_tokens=self.max_new_tokens,
                 inputs=prompt_ids,
                 steps=self.steps,
@@ -240,6 +254,9 @@ class DreamEvalHarness(LM):
                 top_k=self.top_k,
                 alg=self.alg,
                 alg_temp=self.alg_temp,
+                use_cache=self.use_cache,
+                block_size=self.block_size,
+                threshold=self.threshold,
                 output_history=False,
                 return_dict=False,
             )

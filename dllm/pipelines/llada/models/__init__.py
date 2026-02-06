@@ -2,6 +2,7 @@ from .configuration_llada import LLaDAConfig
 from .modeling_llada import LLaDAModelLM
 from .configuration_lladamoe import LLaDAMoEConfig
 from .modeling_lladamoe import LLaDAMoEModelLM
+from ..fastdllm import LLaDAFastdLLMConfig, LLaDAFastdLLMModelLM
 
 # Register with HuggingFace Auto classes for local usage
 try:
@@ -14,6 +15,11 @@ try:
     AutoConfig.register("lladamoe", LLaDAMoEConfig)
     AutoModel.register(LLaDAMoEConfig, LLaDAMoEModelLM)
     AutoModelForMaskedLM.register(LLaDAMoEConfig, LLaDAMoEModelLM)
+
+    AutoConfig.register("llada_fastdllm", LLaDAFastdLLMConfig)
+    AutoModel.register(LLaDAFastdLLMConfig, LLaDAFastdLLMModelLM)
+    AutoModelForMaskedLM.register(LLaDAFastdLLMConfig, LLaDAFastdLLMModelLM)
+
 except ImportError:
     # transformers not available or Auto classes not imported
     pass

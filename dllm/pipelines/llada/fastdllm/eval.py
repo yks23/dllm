@@ -23,7 +23,11 @@ from lm_eval.api.registry import register_model
 from lm_eval.models.utils import get_dtype
 
 import dllm
-from dllm.core.samplers import MDLMSampler, MDLMSamplerConfig
+from dllm.core.samplers import MDLMSamplerConfig
+from dllm.pipelines.llada.fastdllm import (
+    LLaDAFastdLLMSampler,
+    LLaDAFastdLLMConfig,
+)
 
 
 @dataclass
@@ -40,6 +44,9 @@ class LLaDAEvalConfig(MDLMSamplerConfig):
     mc_num: int = 128
     is_check_greedy: bool = False
     device: str = "cuda"
+    use_cache: str | None = None  # prefix | dual | None
+    threshold: float | None = None
+    factor: float | None = None
 
 
 @register_model("llada")
@@ -82,6 +89,9 @@ class LLaDAEvalHarness(LM):
         block_size = kwargs.get("block_size", config.block_size)
         max_length = kwargs.get("max_length", config.max_length)
         remasking = kwargs.get("remasking", config.remasking)
+        use_cache = kwargs.get("use_cache", config.use_cache)
+        threshold = kwargs.get("threshold", config.threshold)
+        factor = kwargs.get("factor", config.factor)
         suppress_tokens = self._parse_token_list(
             kwargs.get("suppress_tokens", config.suppress_tokens)
         )
@@ -104,8 +114,10 @@ class LLaDAEvalHarness(LM):
 
         # Use accelerator for device placement
         pretrained = dllm.utils.resolve_with_base_env(pretrained, "BASE_MODELS_DIR")
+        fast_config = LLaDAFastdLLMConfig.from_pretrained(pretrained)
         self.model = dllm.utils.get_model(
-            SimpleNamespace(model_name_or_path=pretrained, dtype=get_dtype(dtype))
+            SimpleNamespace(model_name_or_path=pretrained, dtype=get_dtype(dtype)),
+            config=fast_config,
         )
         self.model.eval()
 
@@ -139,11 +151,17 @@ class LLaDAEvalHarness(LM):
         self.suppress_tokens = suppress_tokens
         self.begin_suppress_tokens = begin_suppress_tokens
         self.right_shift_logits = right_shift_logits
+        self.use_cache = use_cache
+        self.threshold = threshold
+        self.factor = factor
 
         # loglikelihood params
         self.mc_num = int(mc_num)
         assert mc_num % self.batch_size == 0
         self.sampling_eps = 0.0
+
+        # initialize sampler
+        self.sampler = LLaDAFastdLLMSampler(model=self.model, tokenizer=self.tokenizer)
 
     def apply_chat_template(
         self, chat_history: list[dict[str, str]], add_generation_prompt: bool = True
@@ -360,21 +378,22 @@ class LLaDAEvalHarness(LM):
                 The generated continuation.
         """
         out = []
-        sampler = MDLMSampler(model=self.model, tokenizer=self.tokenizer)
 
         for instance in tqdm(requests, desc="Generating..."):
             context, gen_kwargs = instance.args  # type: ignore
             prompt_ids = self.tokenizer(context)["input_ids"]
             prompt = [torch.tensor(prompt_ids, device=self.device, dtype=torch.long)]
             stop_tokens = gen_kwargs["until"]
-            generated_ids = sampler.sample(
+            generated_ids = self.sampler.sample(
                 inputs=prompt,
                 steps=self.steps,
                 max_new_tokens=self.max_new_tokens,
                 block_size=self.block_size,
                 temperature=0.0,
-                cfg_scale=self.cfg,
                 remasking=self.remasking,
+                use_cache=self.use_cache,
+                threshold=self.threshold,
+                factor=self.factor,
                 suppress_tokens=self.suppress_tokens,
                 begin_suppress_tokens=self.begin_suppress_tokens,
                 right_shift_logits=self.right_shift_logits,

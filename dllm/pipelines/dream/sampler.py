@@ -94,7 +94,7 @@ class DreamSampler(BaseSampler):
         steps = kwargs.get("steps", config.steps)
         eps = kwargs.get("eps", config.eps)
         alg = kwargs.get("alg", config.alg)
-        alg_temp = kwargs.get("eps", config.alg_temp)
+        alg_temp = kwargs.get("alg_temp", config.alg_temp)
         temperature = kwargs.get("temperature", config.temperature)
         top_p = kwargs.get("top_p", config.top_p)
         top_k = kwargs.get("top_k", config.top_k)

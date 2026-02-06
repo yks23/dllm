@@ -15,10 +15,8 @@ def get_model(
     Load a model with flexible input sources.
 
     Args:
-        model_args: An optional dataclass or namespace containing model parameters.
-        model_name_or_path: Optional direct model path or name (overrides model_args.model_name_or_path).
-        dtype: Dtype (string or torch.dtype).
-        load_in_4bit: Whether to load using 4-bit quantization (can override model_args.load_in_4bit).
+        model_args: Dataclass or namespace containing model parameters.
+        config: Optional transformers.PretrainedConfig to use instead of loading from the checkpoint.
 
     Returns:
         transformers.PreTrainedModel
@@ -75,9 +73,7 @@ def get_tokenizer(model_args) -> transformers.PreTrainedTokenizer:
     Load a tokenizer with flexible input sources.
 
     Args:
-        model_args: Optional dataclass or namespace containing model parameters.
-        model: Optional model instance to configure tokenizer behavior.
-        model_name_or_path: Optional direct model name or path (overrides model_args.model_name_or_path).
+        model_args: Namespace/dataclass containing at least model_name_or_path.
 
     Returns:
         transformers.PreTrainedTokenizer
