@@ -8,7 +8,7 @@ import torch
 import torch.distributions as dists
 import torch.nn.functional as F
 
-from dllm.core.samplers.base import BaseSampler, SamplerConfig, SamplerOutput
+from dllm.core.samplers.base import BaseSampler, BaseSamplerConfig, BaseSamplerOutput
 from dllm.core.samplers.utils import get_num_transfer_tokens
 from dllm.pipelines.dream.models.generation_utils import top_k_logits, top_p_logits
 
@@ -54,7 +54,7 @@ def sample_tokens(
 
 
 @dataclass
-class DreamSamplerConfig(SamplerConfig):
+class DreamSamplerConfig(BaseSamplerConfig):
     max_new_tokens: int = 20
     max_length: int = (
         None  # The max_length is set as input_ids.shape[1] + 20: sampler_config.max_length = sampler_config.max_length + input_ids_length
@@ -81,7 +81,7 @@ class DreamSampler(BaseSampler):
         generation_tokens_hook_func=lambda step, x, logits: x,
         generation_logits_hook_func=lambda step, x, logits: logits,
         **kwargs,
-    ) -> SamplerOutput | torch.Tensor:
+    ) -> BaseSamplerOutput | torch.Tensor:
         """
         Diffusion-style masked decoding for *generation from inputs*.
         (docstring unchanged)
@@ -240,7 +240,7 @@ class DreamSampler(BaseSampler):
         if not return_dict:
             return x
         else:
-            return SamplerOutput(sequences=x, histories=histories)
+            return BaseSamplerOutput(sequences=x, histories=histories)
 
     @torch.no_grad()
     def infill(
@@ -250,7 +250,7 @@ class DreamSampler(BaseSampler):
         generation_tokens_hook_func=lambda step, x, logits: x,
         generation_logits_hook_func=lambda step, x, logits: logits,
         **kwargs,
-    ) -> SamplerOutput | torch.Tensor:
+    ) -> BaseSamplerOutput | torch.Tensor:
         """
         Fill in-place the tokenizer's `<mask>` tokens contained in `inputs`.
         The whole (right-aligned) canvas is denoised iteratively: at each step, a scheduler
@@ -439,4 +439,4 @@ class DreamSampler(BaseSampler):
         if not return_dict:
             return x
         else:
-            return SamplerOutput(sequences=x, histories=histories)
+            return BaseSamplerOutput(sequences=x, histories=histories)

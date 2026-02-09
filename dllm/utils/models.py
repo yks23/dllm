@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import accelerate
 import torch
 import transformers
@@ -8,23 +10,26 @@ from dllm.utils.utils import disable_caching_allocator_warmup, load_peft, print_
 
 
 def get_model(
-    model_args,
+    model_args: ModelArguments | None = None,
     config: transformers.PretrainedConfig | None = None,
+    **kwargs,
 ) -> transformers.PreTrainedModel:
     """
     Load a model with flexible input sources.
 
     Args:
-        model_args: Dataclass or namespace containing model parameters.
+        model_args: Dataclass or namespace containing model parameters, or None to use **kwargs.
         config: Optional transformers.PretrainedConfig to use instead of loading from the checkpoint.
+        **kwargs: Override or supply params when model_args is None (e.g. model_name_or_path, dtype).
 
     Returns:
         transformers.PreTrainedModel
     """
-    model_name_or_path = getattr(model_args, "model_name_or_path")
-    dtype = getattr(model_args, "dtype", "bfloat16")
-    load_in_4bit = getattr(model_args, "load_in_4bit", False)
-    attn_implementation = getattr(model_args, "attn_implementation", None)
+    model_args = model_args or ModelArguments()
+    model_name_or_path = kwargs.get("model_name_or_path", getattr(model_args, "model_name_or_path", None))
+    dtype = kwargs.get("dtype", getattr(model_args, "dtype", "bfloat16"))
+    load_in_4bit = kwargs.get("load_in_4bit", getattr(model_args, "load_in_4bit", False))
+    attn_implementation = kwargs.get("attn_implementation", getattr(model_args, "attn_implementation", None))
 
     # Device map: skip when ZeRO-3
     device_map = (
@@ -68,12 +73,13 @@ def get_model(
     return model
 
 
-def get_tokenizer(model_args) -> transformers.PreTrainedTokenizer:
+def get_tokenizer(model_args: ModelArguments | None = None, **kwargs) -> transformers.PreTrainedTokenizer:
     """
     Load a tokenizer with flexible input sources.
 
     Args:
-        model_args: Namespace/dataclass containing at least model_name_or_path.
+        model_args: Namespace/dataclass containing at least model_name_or_path, or None to use **kwargs.
+        **kwargs: Override or supply params when model_args is None (e.g. model_name_or_path).
 
     Returns:
         transformers.PreTrainedTokenizer
@@ -95,7 +101,8 @@ def get_tokenizer(model_args) -> transformers.PreTrainedTokenizer:
     from dllm.pipelines.llada.models.modeling_llada import LLaDAModelLM
     from dllm.pipelines.llada.models.modeling_lladamoe import LLaDAMoEModelLM
 
-    model_name_or_path = getattr(model_args, "model_name_or_path")
+    model_args = model_args or ModelArguments()
+    model_name_or_path = kwargs.get("model_name_or_path", getattr(model_args, "model_name_or_path", None))
 
     # ---------------- Tokenizer loading ----------------
     tokenizer = transformers.AutoTokenizer.from_pretrained(

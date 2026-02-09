@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn.functional as F
 
-from dllm.core.samplers.base import BaseSampler, SamplerConfig, SamplerOutput
+from dllm.core.samplers.base import BaseSampler, BaseSamplerConfig, BaseSamplerOutput
 from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
 
 
@@ -135,7 +135,7 @@ def _diffusion_step_block(
 
 
 @dataclass
-class BD3LMSamplerConfig(SamplerConfig):
+class BD3LMSamplerConfig(BaseSamplerConfig):
     max_new_tokens: int = 128
     max_length: int = (
         None  # There's no explicit length_limit except for the tokenizer/model context
@@ -160,7 +160,7 @@ class BD3LMSampler(BaseSampler):
         inputs: list[torch.Tensor | list],
         config: BD3LMSamplerConfig | None = None,
         **kwargs,
-    ) -> SamplerOutput | torch.Tensor:
+    ) -> BaseSamplerOutput | torch.Tensor:
         """
         Generate text using block diffusion language modeling.
 
@@ -173,7 +173,7 @@ class BD3LMSampler(BaseSampler):
             **kwargs: Override specific config parameters.
 
         Returns:
-            SamplerOutput with generated sequences, or raw tensor if return_dict=False.
+            BaseSamplerOutput with generated sequences, or raw tensor if return_dict=False.
         """
 
         if config is None:
@@ -441,13 +441,13 @@ class BD3LMSampler(BaseSampler):
         if not return_dict:
             return x
         else:
-            return SamplerOutput(sequences=x, histories=histories)
+            return BaseSamplerOutput(sequences=x, histories=histories)
 
     @torch.no_grad()
     def infill(
         self,
         inputs: list[torch.Tensor | list],
-        config: SamplerConfig | None = None,
+        config: BaseSamplerConfig | None = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> BaseSamplerOutput:
         raise NotImplementedError

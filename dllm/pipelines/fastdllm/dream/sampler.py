@@ -8,7 +8,7 @@ import torch
 import torch.distributions as dists
 import torch.nn.functional as F
 
-from dllm.core.samplers.base import BaseSampler, SamplerConfig, SamplerOutput
+from dllm.core.samplers.base import BaseSampler, BaseSamplerConfig, BaseSamplerOutput
 from dllm.core.samplers.utils import get_num_transfer_tokens
 from dllm.pipelines.dream.models.generation_utils import top_k_logits, top_p_logits
 
@@ -54,7 +54,7 @@ def sample_tokens(
 
 
 @dataclass
-class FastdLLMDreamSamplerConfig(SamplerConfig):
+class FastdLLMDreamSamplerConfig(BaseSamplerConfig):
     max_new_tokens: int = 20
     max_length: int = None  # Uses prompt length + max_new_tokens when None
     steps: int = 512
@@ -81,7 +81,7 @@ class FastdLLMDreamSampler(BaseSampler):
         generation_tokens_hook_func=lambda step, x, logits: x,
         generation_logits_hook_func=lambda step, x, logits: logits,
         **kwargs,
-    ) -> SamplerOutput | torch.Tensor:
+    ) -> BaseSamplerOutput | torch.Tensor:
         """
         Diffusion-style masked decoding for *generation from inputs*.
         (docstring unchanged)
@@ -300,7 +300,7 @@ class FastdLLMDreamSampler(BaseSampler):
             if not return_dict:
                 return x
             else:
-                return SamplerOutput(sequences=x, histories=histories)
+                return BaseSamplerOutput(sequences=x, histories=histories)
 
         else:
             dual_cache = use_cache == "dual"
@@ -489,7 +489,7 @@ class FastdLLMDreamSampler(BaseSampler):
             if not return_dict:
                 return x
             else:
-                return SamplerOutput(sequences=x, histories=histories)
+                return BaseSamplerOutput(sequences=x, histories=histories)
 
     @torch.no_grad()
     def infill(
@@ -497,5 +497,5 @@ class FastdLLMDreamSampler(BaseSampler):
         inputs: list[torch.Tensor] | list[list[int]],
         config: FastdLLMDreamSamplerConfig | None = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> BaseSamplerOutput:
         raise NotImplementedError

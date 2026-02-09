@@ -19,167 +19,94 @@ from lm_eval.api.instance import Instance
 from lm_eval.api.registry import register_model
 from tqdm import tqdm
 
-from dllm.core.eval import BaseEvalHarness
+from dllm.core.eval import BaseEvalConfig, BaseEvalHarness
 from dllm.pipelines.dream import DreamSampler, DreamSamplerConfig
 
 eval_logger = logging.getLogger(__name__)
 
 
 @dataclass
-class DreamEvalConfig(DreamSamplerConfig):
-    top_p: float | None = None
-    top_k: float | None = None
+class DreamEvalSamplerConfig(DreamSamplerConfig):
+    """Default sampler config for Dream eval."""
+
     max_new_tokens: int = 128
-    max_length: int = 4096
     steps: int = 128
     temperature: float = 0.0
+    top_p: float | None = None
+    top_k: float | None = None
     alg: str = "entropy"
+    cfg_scale: float = 0.0
 
-    pretrained: str = ""
-    batch_size: int = 1
-    device: str = "cuda"
-    dtype: str | torch.dtype = "auto"
+
+@dataclass
+class DreamEvalConfig(BaseEvalConfig):
+    """Eval-only config for Dream models."""
+
+    max_length: int = 4096
     add_bos_token: bool = False
     nll_type: str = "mc"
     log_type: str = "ftb"
     mc_num: int = 128
-    cfg_scale: float = 0.0
     sampling_eps: float = 1e-3
-    escape_until: bool = False
-    resolve_pretrained_with_base_env: bool = True
 
 
 @register_model("dream")
 class DreamEvalHarness(BaseEvalHarness):
     def __init__(
         self,
-        config: DreamEvalConfig | None = None,
+        eval_config: DreamEvalConfig | None = None,
+        sampler_config: DreamSamplerConfig | None = None,
+        sampler_cls: type[DreamSampler] = DreamSampler,
         **kwargs,
     ) -> None:
-        if config is None:
-            config = DreamEvalConfig()
+        eval_config = eval_config or DreamEvalConfig()
+        sampler_config = sampler_config or DreamEvalSamplerConfig()
 
-        super().__init__(config=config, **kwargs)
-
-        # Dream-specific: pull from config / kwargs
-        batch_size = kwargs.get("batch_size", config.batch_size)
-        max_length = kwargs.get("max_length", config.max_length)
-        add_bos_token = kwargs.get("add_bos_token", config.add_bos_token)
-        nll_type = kwargs.get("nll_type", config.nll_type)
-        log_type = kwargs.get("log_type", config.log_type)
-        mc_num = kwargs.get("mc_num", config.mc_num)
-        max_new_tokens = kwargs.get("max_new_tokens", config.max_new_tokens)
-        cfg_scale = kwargs.get("cfg_scale", config.cfg_scale)
-        sampling_eps = kwargs.get("sampling_eps", config.sampling_eps)
-        steps = kwargs.get("steps", config.steps)
-        temperature = kwargs.get("temperature", config.temperature)
-        top_p = kwargs.get("top_p", config.top_p)
-        top_k = kwargs.get("top_k", config.top_k)
-        alg = kwargs.get("alg", config.alg)
-        alg_temp = kwargs.get("alg_temp", config.alg_temp)
-        escape_until = kwargs.get("escape_until", config.escape_until)
-
-        self.mask_id = self.tokenizer.mask_token_id
-        self.max_length = max_length
-        self.add_bos_token = add_bos_token
-        self.batch_size = int(batch_size)
-        self.max_new_tokens = max_new_tokens
-        self.steps = steps
-        self.temperature = temperature
-        self.top_p = top_p
-        self.top_k = top_k
-        self.alg = alg
-        self.alg_temp = alg_temp
-        self.escape_until = escape_until
-        self.nll_type = nll_type
-        self.log_type = log_type
-        self.mc_num = mc_num
-        self.cfg_scale = float(cfg_scale)
-        self.sampling_eps = sampling_eps
-        self.sampler = DreamSampler(model=self.model, tokenizer=self.tokenizer)
-
-    def tok_decode(
-        self, tokens: torch.Tensor | list[int], skip_special_tokens: bool = True
-    ) -> str:
-        return self.tokenizer.decode(tokens, skip_special_tokens=skip_special_tokens)
-
-    def tok_encode(self, text: str, add_special_tokens: bool = True) -> torch.Tensor:
-        return self.tokenizer(
-            text, return_tensors="pt", add_special_tokens=add_special_tokens
-        ).input_ids
-
-    def generate_until(
-        self, requests: list[Instance], disable_tqdm: bool = False
-    ) -> list[str]:
-        res = []
-        pbar = tqdm(
-            total=len(requests),
-            disable=(disable_tqdm or (self.rank != 0)),
-            desc="Running generate_until requests",
+        super().__init__(
+            eval_config=eval_config,
+            sampler_config=sampler_config,
+            sampler_cls=sampler_cls,
+            **kwargs,
         )
-        for batch_idx in range(0, len(requests), self.batch_size):
-            batch_requests = requests[batch_idx : batch_idx + self.batch_size]
-            contexts, gen_args = zip(*[req.args for req in batch_requests])
 
-            prompts = list(contexts)
-            if self.add_bos_token:
-                prompts = [self.tokenizer.bos_token + p for p in prompts]
+        # Dream-specific eval params (used by loglikelihood methods)
+        self.mask_id = self.tokenizer.mask_token_id
+        self.max_length = int(kwargs.get("max_length", eval_config.max_length))
+        self.add_bos_token = kwargs.get("add_bos_token", eval_config.add_bos_token)
+        self.nll_type = kwargs.get("nll_type", eval_config.nll_type)
+        self.log_type = kwargs.get("log_type", eval_config.log_type)
+        self.mc_num = int(kwargs.get("mc_num", eval_config.mc_num))
+        self.sampling_eps = float(kwargs.get("sampling_eps", eval_config.sampling_eps))
 
-            prompt_ids = [
-                self.tokenizer(p, return_tensors="pt", padding=False)
-                .input_ids.squeeze()
-                .to(self.device)
-                for p in prompts
-            ]
-            prompt_lens = [len(p_id) for p_id in prompt_ids]
+    # ── Public API (lm-eval) ──────────────────────────────────────────
 
-            if max(prompt_lens) > self.max_length - self.max_new_tokens:
-                cutoff_len = self.max_length - self.max_new_tokens
-                eval_logger.warning(
-                    f"Prompt length {max(prompt_lens)} exceeds {cutoff_len}, cutoff on the left side"
-                )
-                prompt_ids = [p_id[-cutoff_len:] for p_id in prompt_ids]
-
-            generation_ids = self.sampler.sample(
-                max_new_tokens=self.max_new_tokens,
-                inputs=prompt_ids,
-                steps=self.steps,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                top_k=self.top_k,
-                alg=self.alg,
-                alg_temp=self.alg_temp,
-                cfg_scale=self.cfg_scale,
-                output_history=False,
-                return_dict=False,
+    @torch.no_grad()
+    def loglikelihood(self, requests: list[Instance]) -> list[tuple[float, bool]]:
+        out = []
+        for instance in tqdm(requests, desc="Computing likelihood..."):
+            prefix_ids, target_ids = self._encode_pair(*instance.args)
+            assert len(prefix_ids) + len(target_ids) <= self.max_length, (
+                f"Context + continuation length exceeds {self.max_length} tokens: "
+                f"{len(prefix_ids)} + {len(target_ids)}"
             )
-            cleaned_generation_ids = [
-                (
-                    seq[seq.ne(self.tokenizer.eos_token_id).float().argmax().long() :]
-                    if (seq != self.tokenizer.eos_token_id).any()
-                    else seq[-1:]
-                )
-                for seq in generation_ids
-            ]
-            truncated_generation_ids = [
-                seq[prompt_lens[i] :] for i, seq in enumerate(cleaned_generation_ids)
-            ]
-            responses = [
-                g.removeprefix("<|endoftext|>").split(self.tokenizer.eos_token, 1)[0]
-                for g in self.tokenizer.batch_decode(truncated_generation_ids)
-            ]
+            prefix = torch.tensor(prefix_ids, device=self.device, dtype=torch.long)
+            target = torch.tensor(target_ids, device=self.device, dtype=torch.long)
 
-            if not self.escape_until:
-                for i, r in enumerate(responses):
-                    for s in gen_args[i]["until"]:
-                        r = r.split(s)[0]
-                    responses[i] = r
+            if self.nll_type == "mc":
+                ll = -self._eval_target_nll_mc(prefix, target)
+                if self.log_type == "union":
+                    ll = ll / (len(target) + len(prefix))
+            elif self.nll_type == "ar_ftb" or self.nll_type == "ar_btf":
+                ll = -self._eval_target_nll_ar(prefix, target)
+            else:
+                raise NotImplementedError(self.nll_type)
 
-            res.extend(responses)
-            pbar.update(len(contexts))
+            out.append((ll, False))
+        return out
 
-        return res
+    # ── Private helpers (loglikelihood) ──────────────────────────────
 
+    @torch.no_grad()
     def _forward_process(
         self, batch: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -199,7 +126,7 @@ class DreamEvalHarness(BaseEvalHarness):
         return noisy_batch, p_mask
 
     @torch.no_grad()
-    def get_logits(
+    def _get_logits(
         self, batch: torch.Tensor, prompt_index: torch.Tensor
     ) -> torch.Tensor:
         """Single conditional forward for loglikelihood; CFG is only used in the sampler (generate_until)."""
@@ -237,7 +164,7 @@ class DreamEvalHarness(BaseEvalHarness):
                 raise NotImplementedError(self.log_type)
 
             mask_indices = perturbed_seq == self.mask_id
-            logits = self.get_logits(perturbed_seq, prompt_index)
+            logits = self._get_logits(perturbed_seq, prompt_index)
             loss = (
                 F.cross_entropy(
                     logits[mask_indices], seq[mask_indices], reduction="none"
@@ -304,7 +231,7 @@ class DreamEvalHarness(BaseEvalHarness):
             perturbed_seq_ = perturbed_seq_.to(self.device)
             if len(perturbed_seq_.shape) == 1:
                 perturbed_seq_ = perturbed_seq_.unsqueeze(0)
-            logits = self.get_logits(perturbed_seq_, prompt_index)
+            logits = self._get_logits(perturbed_seq_, prompt_index)
             logits_.append(logits.cpu())
         logits = torch.cat(logits_, dim=0)
 
@@ -382,33 +309,6 @@ class DreamEvalHarness(BaseEvalHarness):
                 context_enc = []
                 continuation_enc = whole_enc[-self.max_length :]
         return context_enc, continuation_enc
-
-    def loglikelihood(self, requests: list[Instance]) -> list[tuple[float, bool]]:
-        out = []
-        with torch.no_grad():
-            for instance in tqdm(requests, desc="Computing likelihood..."):
-                prefix_ids, target_ids = self._encode_pair(*instance.args)
-                assert len(prefix_ids) + len(target_ids) <= self.max_length, (
-                    f"Context + continuation length exceeds {self.max_length} tokens: "
-                    f"{len(prefix_ids)} + {len(target_ids)}"
-                )
-                prefix = torch.tensor(prefix_ids, device=self.device, dtype=torch.long)
-                target = torch.tensor(target_ids, device=self.device, dtype=torch.long)
-
-                if self.nll_type == "mc":
-                    ll = -self._eval_target_nll_mc(prefix, target)
-                    if self.log_type == "union":
-                        ll = ll / (len(target) + len(prefix))
-                elif self.nll_type == "ar_ftb" or self.nll_type == "ar_btf":
-                    ll = -self._eval_target_nll_ar(prefix, target)
-                else:
-                    raise NotImplementedError(self.nll_type)
-
-                out.append((ll, False))
-        return out
-
-    def loglikelihood_rolling(self, requests: list[Instance]) -> list[float]:
-        raise NotImplementedError
 
 
 if __name__ == "__main__":

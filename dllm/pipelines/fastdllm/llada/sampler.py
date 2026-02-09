@@ -9,7 +9,7 @@ from typing import Optional, Tuple, List, Union
 import torch
 import torch.nn.functional as F
 
-from dllm.core.samplers.base import BaseSampler, SamplerConfig, SamplerOutput
+from dllm.core.samplers.base import BaseSampler, BaseSamplerConfig, BaseSamplerOutput
 from dllm.core.samplers.utils import add_gumbel_noise, get_num_transfer_tokens
 
 
@@ -154,7 +154,7 @@ def _get_transfer_index(
 
 
 @dataclass
-class FastdLLMLLaDASamplerConfig(SamplerConfig):
+class FastdLLMLLaDASamplerConfig(BaseSamplerConfig):
     max_new_tokens: int = 128
     max_length: int = None
     block_size: int = 128
@@ -184,7 +184,7 @@ class FastdLLMLLaDASampler(BaseSampler):
         inputs: Union[List[torch.Tensor], List[List[int]], torch.Tensor],
         config: Optional[FastdLLMLLaDASamplerConfig] = None,
         **kwargs,
-    ) -> SamplerOutput | torch.Tensor:
+    ) -> BaseSamplerOutput | torch.Tensor:
         """
         Fast-dLLM v1 sampler.
         Supports:
@@ -607,7 +607,7 @@ class FastdLLMLLaDASampler(BaseSampler):
         # ----- Output format -----
         if not return_dict:
             return x
-        return SamplerOutput(sequences=x, histories=histories)
+        return BaseSamplerOutput(sequences=x, histories=histories)
 
     @torch.no_grad()
     def infill(
@@ -615,5 +615,5 @@ class FastdLLMLLaDASampler(BaseSampler):
         inputs: Union[List[torch.Tensor], List[List[int]]],
         config: FastdLLMLLaDASamplerConfig | None = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> BaseSamplerOutput:
         raise NotImplementedError

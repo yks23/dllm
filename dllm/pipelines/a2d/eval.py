@@ -16,7 +16,6 @@ from lm_eval.api.registry import register_model
 
 from dllm.core.eval import (
     BD3LMEvalHarness as BD3LMEvalHarnessBase,
-    MDLMEvalConfig,
     MDLMEvalHarness,
 )
 
@@ -25,10 +24,7 @@ from dllm.core.eval import (
 class A2DMDLMEvalHarness(MDLMEvalHarness):
     """A2D MDLM eval: thin subclass of core MDLMEvalHarness."""
 
-    def __init__(self, config: MDLMEvalConfig | None = None, **kwargs):
-        if config is None:
-            config = MDLMEvalConfig()
-        super().__init__(config=config, **kwargs)
+    pass
 
 
 @register_model("a2d_bd3lm")

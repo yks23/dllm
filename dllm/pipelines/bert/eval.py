@@ -11,50 +11,46 @@ accelerate launch \
 
 from dataclasses import dataclass
 
-import torch
 from lm_eval.__main__ import cli_evaluate
 from lm_eval.api.registry import register_model
 
 from dllm.core.eval import MDLMEvalConfig, MDLMEvalHarness
+from dllm.core.samplers import MDLMSampler, MDLMSamplerConfig
+
+
+@dataclass
+class BERTEvalSamplerConfig(MDLMSamplerConfig):
+    """Default sampler config for BERT eval (shorter context)."""
+
+    max_new_tokens: int = 128
+    steps: int = 128
+    block_size: int = 128
 
 
 @dataclass
 class BERTEvalConfig(MDLMEvalConfig):
-    max_new_tokens: int = 128
-    max_length: int = 512
-    steps: int = 128
-    block_size: int = 128
+    """BERT eval config. Overrides max_length for BERT's shorter context."""
 
-    pretrained: str = ""
-    dtype: str | torch.dtype = "auto"
-    batch_size: int = 32
-    mc_num: int = 128
-    is_check_greedy: bool = False
-    device: str = "cuda"
+    max_length: int = 512
 
 
 @register_model("bert")
 class BERTEvalHarness(MDLMEvalHarness):
     def __init__(
         self,
-        config: BERTEvalConfig | None = None,
+        eval_config: BERTEvalConfig | None = None,
+        sampler_config: MDLMSamplerConfig | None = None,
+        sampler_cls: type[MDLMSampler] = MDLMSampler,
         **kwargs,
     ):
-        if config is None:
-            config = BERTEvalConfig()
-        super().__init__(config=config, **kwargs)
-
-    def _prepare_prompt_for_generation(self, context: str) -> list[torch.Tensor]:
-        """Drop [CLS] and [SEP] from BERT tokenizer output for generation."""
-        prompt_ids = torch.tensor(
-            self.tokenizer(context)["input_ids"],
-            device=self.device,
-            dtype=torch.long,
+        eval_config = eval_config or BERTEvalConfig()
+        sampler_config = sampler_config or BERTEvalSamplerConfig()
+        super().__init__(
+            eval_config=eval_config,
+            sampler_config=sampler_config,
+            sampler_cls=sampler_cls,
+            **kwargs,
         )
-        trimmed_prompt = (
-            prompt_ids[1:-1] if prompt_ids.numel() > 2 else prompt_ids
-        )
-        return [trimmed_prompt]
 
 
 if __name__ == "__main__":

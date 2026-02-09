@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import torch
 
-from dllm.core.samplers.base import BaseSampler, SamplerConfig, SamplerOutput
+from dllm.core.samplers.base import BaseSampler, BaseSamplerConfig, BaseSamplerOutput
 from dllm.core.schedulers import BaseKappaScheduler, LinearKappaScheduler
 
 
@@ -96,7 +96,7 @@ def tau_leap_step(
 
 
 @dataclass
-class EditFlowSamplerConfig(SamplerConfig):
+class EditFlowSamplerConfig(BaseSamplerConfig):
     tau: float = 0.01
     time_epsilon: float = 1e-3
     mask_length: int = 128
@@ -114,7 +114,7 @@ class EditFlowSampler(BaseSampler):
         inputs: list[torch.Tensor | list],
         config: EditFlowSamplerConfig | None = None,
         **kwargs,
-    ) -> SamplerOutput | torch.Tensor:
+    ) -> BaseSamplerOutput | torch.Tensor:
 
         if config is None:
             config = EditFlowSamplerConfig()
@@ -199,13 +199,13 @@ class EditFlowSampler(BaseSampler):
         x = x.unsqueeze(0)  # [1, T]
         if not return_dict:
             return x
-        return SamplerOutput(sequences=x, histories=histories)
+        return BaseSamplerOutput(sequences=x, histories=histories)
 
     @torch.no_grad()
     def infill(
         self,
         inputs: list[torch.Tensor | list],
-        config: SamplerConfig | None = None,
+        config: BaseSamplerConfig | None = None,
         **kwargs,
-    ) -> SamplerOutput:
+    ) -> BaseSamplerOutput:
         raise NotImplementedError
