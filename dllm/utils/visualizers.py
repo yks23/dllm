@@ -59,6 +59,8 @@ class TerminalVisualizer(BaseVisualizer):
         every_n_steps: int = 1,
         show_header: bool = True,
         skip_special_tokens: bool = False,
+        info_gain_scores: list[torch.Tensor] | None = None,  # Info-Gain scores per step
+        candidate_tokens: list[torch.Tensor] | None = None,  # Candidate tokens per step
     ) -> None:
         """
         Visualize a masked-diffusion decoding trajectory stored in `history`.
@@ -72,6 +74,12 @@ class TerminalVisualizer(BaseVisualizer):
                 for b_idx in range(B):
                     # build per-sequence history
                     seq_history = [step[b_idx].unsqueeze(0) for step in history]
+                    seq_scores = None
+                    if info_gain_scores:
+                        seq_scores = [score[b_idx].unsqueeze(0) if score is not None and score.dim() > 1 else score for score in info_gain_scores]
+                    seq_cand_tokens = None
+                    if candidate_tokens:
+                        seq_cand_tokens = [tokens[b_idx].unsqueeze(0) if tokens is not None and tokens.dim() > 1 else tokens for tokens in candidate_tokens]
                     self.visualize_one_history(
                         seq_history,
                         fps,
@@ -81,6 +89,8 @@ class TerminalVisualizer(BaseVisualizer):
                         every_n_steps=every_n_steps,
                         show_header=show_header,
                         skip_special_tokens=skip_special_tokens,
+                        info_gain_scores=seq_scores,
+                        candidate_tokens=seq_cand_tokens,
                     )
             else:
                 # no batch, just visualize normally
@@ -93,6 +103,8 @@ class TerminalVisualizer(BaseVisualizer):
                     every_n_steps,
                     show_header,
                     skip_special_tokens,
+                    info_gain_scores,
+                    candidate_tokens,
                 )
         except Exception as e:
             print(f"(Visualization skipped due to error: {e})")
@@ -107,6 +119,8 @@ class TerminalVisualizer(BaseVisualizer):
         every_n_steps: int = 1,  # re-render frequency (perf knob)
         show_header: bool = True,
         skip_special_tokens: bool = False,  # NEW ARGUMENT
+        info_gain_scores: list[torch.Tensor] | None = None,  # Info-Gain scores per step
+        candidate_tokens: list[torch.Tensor] | None = None,  # Candidate tokens per step
     ) -> None:
         """
         Visualize a masked-diffusion decoding trajectory stored in `history`.
@@ -305,29 +319,41 @@ class TerminalVisualizer(BaseVisualizer):
                 progress.update(task_id, advance=1, masks=masks_remaining, pct=pct)
 
                 # text panel: decode whole sequence (avoids Ġ/Ċ artifacts)
-                if (
-                    every_n_steps <= 1
-                    or (step_idx % every_n_steps == 0)
-                    or step_idx in (1, total_steps)
-                ):
-                    text_str = self._detok(
-                        toks, skip_special_tokens=skip_special_tokens
-                    )
+                # Always render to show real-time updates with Info-Gain colors
+                # Get info-gain scores and candidate tokens for current step if available
+                step_scores = None
+                if info_gain_scores and step_idx <= len(info_gain_scores):
+                    step_scores = info_gain_scores[step_idx - 1]
+                step_cand_tokens = None
+                if candidate_tokens and step_idx <= len(candidate_tokens):
+                    step_cand_tokens = candidate_tokens[step_idx - 1]
+                
+                text_rich = self._detok_with_info_gain(
+                    toks, step_scores, step_cand_tokens, skip_special_tokens=skip_special_tokens
+                )
+                if text_rich is None:
+                    text_str = self._detok(toks, skip_special_tokens=skip_special_tokens)
                     text_str = self._truncate(text_str, max_chars)
                     text_rich = Text.from_ansi(text_str) if text_str else Text("")
-                    layout["text"].update(
-                        Panel(
-                            (
-                                text_rich
-                                if text_rich.plain
-                                else Text("[dim]— no tokens —[/dim]")
-                            ),
-                            title="[bold]Generated Text",
-                            subtitle=f"[dim]Step {step_idx}/{total_steps}[/dim]",
-                            border_style="cyan",
-                            padding=(1, 1),
-                        )
+                else:
+                    # Truncate if needed (approximate)
+                    if max_chars:
+                        # Simple truncation - could be improved
+                        pass
+                
+                layout["text"].update(
+                    Panel(
+                        (
+                            text_rich
+                            if (hasattr(text_rich, 'plain') and text_rich.plain) or (isinstance(text_rich, str) and text_rich)
+                            else Text("[dim]— no tokens —[/dim]")
+                        ),
+                        title="[bold]Generated Text (Info-Gain Candidates Colored)",
+                        subtitle=f"[dim]Step {step_idx}/{total_steps} - Red=Low Score, Blue=High Score[/dim]",
+                        border_style="cyan",
+                        padding=(1, 1),
                     )
+                )
 
                 layout["progress"].update(Panel(progress))
                 if sleep_s > 0:
@@ -421,6 +447,134 @@ class TerminalVisualizer(BaseVisualizer):
         if max_chars is None or (isinstance(max_chars, int) and max_chars < 0):
             return s
         return s[:max_chars]
+
+    def _score_to_color(self, score: float, min_score: float, max_score: float) -> str:
+        """
+        Convert info-gain score to color (red=low, blue=high).
+        Returns Rich color style string.
+        """
+        if min_score == max_score or not (min_score <= score <= max_score):
+            return "white"
+        
+        # Normalize to [0, 1]
+        normalized = (score - min_score) / (max_score - min_score)
+        
+        # Map to RGB: red (1,0,0) -> blue (0,0,1)
+        # Red component decreases, Blue component increases
+        red = int(255 * (1 - normalized))
+        blue = int(255 * normalized)
+        green = 0
+        
+        return f"rgb({red},{green},{blue})"
+
+    def _detok_with_info_gain(
+        self, ids_or_tensor, scores: torch.Tensor | None, candidate_tokens: torch.Tensor | None = None, *, skip_special_tokens: bool
+    ) -> Text | None:
+        """
+        Detokenize with Info-Gain score coloring.
+        Returns Rich Text object with colored tokens, or None if scores not available.
+        """
+        if scores is None:
+            return None
+        
+        try:
+            from rich.text import Text
+        except ImportError:
+            return None
+        
+        tokenizer = self.tokenizer
+        # normalize to python list[int]
+        if isinstance(ids_or_tensor, torch.Tensor):
+            t = self._first_item(ids_or_tensor).long()
+            ids = t.tolist()
+        elif isinstance(ids_or_tensor, (list, tuple)):
+            ids = list(ids_or_tensor)
+        else:
+            return None
+        
+        # Get scores as list
+        if isinstance(scores, torch.Tensor):
+            scores_t = self._first_item(scores)
+            scores_list = scores_t.tolist()
+        else:
+            return None
+        
+        # Filter out invalid scores and get valid range
+        valid_scores = [
+            s for s in scores_list 
+            if s != float('-inf') and s != float('inf') and not (isinstance(s, float) and (s != s))  # Exclude NaN
+        ]
+        if not valid_scores:
+            return None
+        
+        min_score = min(valid_scores)
+        max_score = max(valid_scores)
+        
+        # If all scores are the same, use a small range to enable coloring
+        if min_score == max_score:
+            max_score = min_score + 1e-6
+        
+        # Get candidate tokens as list
+        cand_tokens_list = None
+        if candidate_tokens is not None:
+            if isinstance(candidate_tokens, torch.Tensor):
+                cand_tokens_t = self._first_item(candidate_tokens)
+                cand_tokens_list = cand_tokens_t.tolist()
+        
+        # Decode tokens one by one to apply colors
+        eos_id = getattr(self, "_eos_token_id", None)
+        mask_id = getattr(self, "_mask_token_id", None)
+        result = Text()
+        
+        # Build a mapping of token positions to scores
+        # Note: scores_list should align with token positions
+        for i, tid in enumerate(ids):
+            # Skip special tokens if requested
+            if skip_special_tokens:
+                specials = getattr(self, "_specials", set())
+                pad_id = getattr(self, "_pad_token_id", None)
+                if tid in specials or (pad_id is not None and tid == pad_id) or (eos_id is not None and tid == eos_id):
+                    continue
+            
+            # Check if this is a mask position with candidate token
+            use_candidate = False
+            cand_tid = tid
+            if cand_tokens_list and i < len(cand_tokens_list):
+                cand_tid_from_list = cand_tokens_list[i]
+                # If candidate token is not mask_id, use it for display
+                if cand_tid_from_list != mask_id and cand_tid_from_list != tid:
+                    use_candidate = True
+                    cand_tid = cand_tid_from_list
+            
+            # Get token text (use candidate token if available)
+            display_tid = cand_tid if use_candidate else tid
+            try:
+                token_text = tokenizer.decode([display_tid], skip_special_tokens=False)
+            except Exception:
+                token_text = tokenizer.convert_ids_to_tokens([display_tid])[0] if hasattr(tokenizer, "convert_ids_to_tokens") else str(display_tid)
+            
+            # Apply color based on score for all tokens with valid scores
+            # Color ALL candidate positions considered by Info-Gain (not just selected ones)
+            if i < len(scores_list):
+                score = scores_list[i]
+                # Check for valid score (not -inf, inf, or NaN)
+                is_valid = (
+                    score != float('-inf') and 
+                    score != float('inf') and 
+                    not (isinstance(score, float) and (score != score))  # Check for NaN
+                )
+                if is_valid:
+                    # Color all tokens with valid scores (these are candidate positions considered by Info-Gain)
+                    color = self._score_to_color(score, min_score, max_score)
+                    result.append(token_text, style=color)
+                else:
+                    # No score for this position, render normally
+                    result.append(token_text)
+            else:
+                # No score data for this position
+                result.append(token_text)
+        
+        return result if result.plain else None
 
 
 if __name__ == "__main__":

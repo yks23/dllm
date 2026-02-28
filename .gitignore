@@ -2,7 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+run_gsm8k_4gpu.sh
+results/
 # C extensions
 *.so
 

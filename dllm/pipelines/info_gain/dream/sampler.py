@@ -242,6 +242,7 @@ class InfoGainDreamSampler(BaseSampler):
         assert uc in (None, "prefix", "dual"), f"bad use_cache={uc!r}"
         mtid = self.tokenizer.mask_token_id
         eos = self.tokenizer.eos_token_id
+        pad_token_id = getattr(self.tokenizer, 'pad_token_id', None)
 
         # ── canvas (left-padded) ────────────────────────────────────────
         if isinstance(inputs[0], list):
@@ -277,11 +278,36 @@ class InfoGainDreamSampler(BaseSampler):
             pid.masked_fill_(am == 0, 1)
 
         def shift(lg):
+            # Suppress EOS and PAD tokens by subtracting 4 from logits
+            if eos is not None:
+                lg[:, :, eos] -= 4.0
+            if pad_token_id is not None:
+                lg[:, :, pad_token_id] -= 4.0
             return (
                 torch.cat([lg[:, :1], lg[:, :-1]], dim=1)
                 if C["right_shift_logits"]
                 else lg
             )
+        
+        def _check_and_fill_eos():
+            """Check if EOS token appears, and fill remaining mask positions with EOS if found."""
+            if eos is None:
+                return
+            # Dream uses left-padded canvas, generation region is from gs to T
+            gs = T - mnt
+            # Check if EOS appears in the generation region
+            for i in range(B):
+                # Generation region is from gs to T (left-padded)
+                gen_region = x[i, gs:]
+                eos_positions = (gen_region == eos).nonzero(as_tuple=True)[0]
+                if len(eos_positions) > 0:
+                    # Found EOS, fill all remaining mask positions with EOS
+                    first_eos_pos = gs + eos_positions[0].item()
+                    # Fill all mask positions after the first EOS with EOS
+                    if first_eos_pos + 1 < T:
+                        remaining_mask = (x[i, first_eos_pos + 1:] == mtid)
+                        if remaining_mask.any():
+                            x[i, first_eos_pos + 1:][remaining_mask] = eos
 
         ig = dict(
             n_cand=C["candidate_number"],
@@ -329,11 +355,13 @@ class InfoGainDreamSampler(BaseSampler):
                     logits = shift(self.model(x, am, pid).logits)
                 if is_last:
                     x = _fill(logits, mi)
+                    _check_and_fill_eos()
                     hist and hist.append(x.clone())
                     break
                 bp = self._bypass(logits, x, mi, mtid, ki, C["threshold"])
                 if bp is not None:
                     x = bp
+                    _check_and_fill_eos()
                     cl = None
                     hist and hist.append(x.clone())
                     continue
@@ -351,6 +379,7 @@ class InfoGainDreamSampler(BaseSampler):
                     tok_idx=pid,
                     **ig,
                 )
+                _check_and_fill_eos()
                 hist and hist.append(x.clone())
             return (
                 x
@@ -390,6 +419,7 @@ class InfoGainDreamSampler(BaseSampler):
             logits = shift(mo.logits)
             _, x0f = _sample(logits, C["temperature"], C["top_p"], C["top_k"])
             x[:, cbs] = x0f[:, cbs]
+            _check_and_fill_eos()
             hist and hist.append(x.clone())
 
             rp = None
@@ -453,12 +483,14 @@ class InfoGainDreamSampler(BaseSampler):
 
                 if is_last:
                     x = _fill(lf, fm)
+                    _check_and_fill_eos()
                     crl = None
                     hist and hist.append(x.clone())
                     break
                 bp = self._bypass(lf, x, fm, mtid, ks, C["threshold"])
                 if bp is not None:
                     x = bp
+                    _check_and_fill_eos()
                     crl = None
                     hist and hist.append(x.clone())
                     ins += 1
@@ -483,6 +515,7 @@ class InfoGainDreamSampler(BaseSampler):
                     tok_idx=tok_idx,
                     **ig,
                 )
+                _check_and_fill_eos()
                 hist and hist.append(x.clone())
                 ins += 1
                 if not (x[:, cbs:cbe] == mtid).any():

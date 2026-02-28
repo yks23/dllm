@@ -11,6 +11,8 @@ from dllm.core.schedulers import BaseAlphaScheduler, LinearAlphaScheduler
 class BaseSamplerOutput:
     sequences: torch.Tensor
     histories: list[torch.Tensor] | None = None
+    info_gain_scores: list[torch.Tensor] | None = None  # Info-Gain scores per position per step
+    candidate_tokens: list[torch.Tensor] | None = None  # Candidate tokens per position per step (for visualization)
 
 
 @dataclass

@@ -54,20 +54,32 @@ def _info_gain_select(
     )
     actions, x0s, conf_base, valid, _ = result
 
-    def _make(sel, x0):
+    def _make(sel, x0, score_val=0.0):
         tr = x.new_zeros(1, T, dtype=torch.bool)
         tr[0, sel] = True
+        pos_scores = torch.full((1, T), float('-inf'), device=x.device, dtype=logits.dtype)
+        candidate_tokens = torch.full((1, T), mask_id, device=x.device, dtype=x.dtype)  # Initialize with mask_id
+        # For trivial cases, use the provided score
+        if len(sel) > 0:
+            per_pos_score = score_val / len(sel) if len(sel) > 0 else score_val
+            pos_scores[0, sel] = per_pos_score
+            # Store candidate tokens for visualization
+            candidate_tokens[0, sel] = x0[0, sel]
         return (
             torch.where(tr, x0, x),
             compute_entropy(logits)[0, sel].sum().item(),
             None,
+            pos_scores,
+            candidate_tokens,
         )
 
     # Trivial early returns
     if actions is None:
         nv = valid.shape[0]
         if nv == 0:
-            return x.clone(), 0.0, None
+            pos_scores = torch.full((1, T), float('-inf'), device=device, dtype=logits.dtype)
+            candidate_tokens = torch.full((1, T), mask_id, device=device, dtype=x.dtype)
+            return x.clone(), 0.0, None, pos_scores, candidate_tokens
         if nv <= k:
             return _make(valid, x0s)
         _, ti = torch.topk(conf_base[0], k)
@@ -134,7 +146,35 @@ def _info_gain_select(
     best = scores.argmax().item()
     xo = x.clone()
     xo[0, actions[best]] = x0s[best][0, actions[best]]
-    return xo, scores[best].item(), next_logits[best : best + 1]
+    
+    # Create per-position scores tensor (for visualization)
+    # Initialize with -inf for all positions
+    pos_scores = torch.full((1, T), float('-inf'), device=device, dtype=logits.dtype)
+    # Create candidate tokens tensor (for visualization) - initialize with mask_id
+    candidate_tokens = torch.full((1, T), mask_id, device=device, dtype=x.dtype)
+    
+    # Store scores and tokens for ALL candidates (not just the selected one)
+    # This allows visualization of all candidates considered by Info-Gain
+    # For each candidate, store its score and tokens at all positions it covers
+    for i, action in enumerate(actions):
+        score = scores[i].item()
+        k_selected = len(action)
+        if k_selected > 0:
+            per_pos_score = score / k_selected  # Average score per position for this candidate
+            # Store the maximum score and corresponding tokens for each position
+            for pos in action:
+                if pos_scores[0, pos].item() == float('-inf'):
+                    pos_scores[0, pos] = per_pos_score
+                    # Store the token from this candidate
+                    candidate_tokens[0, pos] = x0s[i][0, pos]
+                else:
+                    # Keep the maximum score if multiple candidates cover the same position
+                    # and update token if this candidate has a higher score
+                    if per_pos_score > pos_scores[0, pos].item():
+                        pos_scores[0, pos] = per_pos_score
+                        candidate_tokens[0, pos] = x0s[i][0, pos]
+    
+    return xo, scores[best].item(), next_logits[best : best + 1], pos_scores, candidate_tokens
 
 
 # ── Config / Sampler ────────────────────────────────────────────────────────
@@ -228,18 +268,49 @@ class InfoGainLLaDASampler(BaseSampler):
             attn[i, : min(len(p) + mnt, T)] = 1
 
         histories = [x.clone()] if C["return_dict"] else None
+        info_gain_scores = [] if C["return_dict"] else None
+        candidate_tokens_list = [] if C["return_dict"] else None
         bs = C["block_size"]
         nb = math.ceil(mnt / bs)
         spb = math.ceil(C["steps"] / nb)
         base_off = prompt_lens[0] if use_cache and len(set(prompt_lens)) == 1 else mpl
         if use_cache and len(set(prompt_lens)) != 1:
             raise ValueError("use_cache requires equal prompt lengths")
+        
+        # Get EOS token ID (used for early stopping)
+        eos_token_id = getattr(self.tokenizer, 'eos_token_id', None)
+        
+        def _check_and_fill_eos():
+            """Check if EOS token appears, and fill remaining mask positions with EOS if found."""
+            if eos_token_id is None:
+                return
+            # Check if EOS appears in the generated region (after prompt)
+            for i in range(B):
+                # Find the first EOS token in the generation region
+                gen_start = prompt_lens[i] if i < len(prompt_lens) else mpl
+                gen_region = x[i, gen_start:]
+                eos_positions = (gen_region == eos_token_id).nonzero(as_tuple=True)[0]
+                if len(eos_positions) > 0:
+                    # Found EOS, fill all remaining mask positions with EOS
+                    first_eos_pos = gen_start + eos_positions[0].item()
+                    # Fill all mask positions after the first EOS with EOS
+                    if first_eos_pos + 1 < T:
+                        remaining_mask = (x[i, first_eos_pos + 1:] == mask_id)
+                        if remaining_mask.any():
+                            x[i, first_eos_pos + 1:][remaining_mask] = eos_token_id
 
         def suppress(logits_):
             for lst in (C["suppress_tokens"], C["begin_suppress_tokens"]):
                 if lst:
                     for tid in lst:
                         logits_[:, :, tid] = -torch.inf
+            # Suppress EOS and PAD tokens by subtracting 4 from logits
+            eos_token_id = getattr(self.tokenizer, 'eos_token_id', None)
+            pad_token_id = getattr(self.tokenizer, 'pad_token_id', None)
+            if eos_token_id is not None:
+                logits_[:, :, eos_token_id] -= 4.0
+            if pad_token_id is not None:
+                logits_[:, :, pad_token_id] -= 4.0
 
         def prep(model_out):
             logits_ = model_out.logits
@@ -285,16 +356,34 @@ class InfoGainLLaDASampler(BaseSampler):
                         add_gumbel_noise(logits_full, C["temperature"]), -1
                     )
                     x = torch.where(ma, x0, x)
+                    # Check for EOS and fill remaining positions
+                    _check_and_fill_eos()
                     cached = None
                     histories and histories.append(x.clone())
+                    # For last step, no info-gain scores (all filled at once)
+                    if info_gain_scores is not None:
+                        pos_scores = torch.full((1, T), float('-inf'), device=x.device, dtype=logits_full.dtype)
+                        info_gain_scores.append(pos_scores)
+                    if candidate_tokens_list is not None:
+                        cand_tokens = torch.full((1, T), mask_id, device=x.device, dtype=x.dtype)
+                        candidate_tokens_list.append(cand_tokens)
                     return False
                 bp = self._bypass(logits_full, x, ma, s, e, ki, C["threshold"])
                 if bp is not None:
                     x = bp
+                    # Check for EOS and fill remaining positions
+                    _check_and_fill_eos()
                     cached = None
                     histories and histories.append(x.clone())
+                    # For bypass, no info-gain scores
+                    if info_gain_scores is not None:
+                        pos_scores = torch.full((1, T), float('-inf'), device=x.device, dtype=logits_full.dtype)
+                        info_gain_scores.append(pos_scores)
+                    if candidate_tokens_list is not None:
+                        cand_tokens = torch.full((1, T), mask_id, device=x.device, dtype=x.dtype)
+                        candidate_tokens_list.append(cand_tokens)
                     return True
-                x, _, cached = _info_gain_select(
+                x, _, cached, pos_scores, cand_tokens = _info_gain_select(
                     self.model,
                     x,
                     logits_full,
@@ -309,7 +398,13 @@ class InfoGainLLaDASampler(BaseSampler):
                     attention_mask=attn,
                     **ig,
                 )
+                # Check for EOS and fill remaining positions
+                _check_and_fill_eos()
                 histories and histories.append(x.clone())
+                if info_gain_scores is not None:
+                    info_gain_scores.append(pos_scores)
+                if candidate_tokens_list is not None:
+                    candidate_tokens_list.append(cand_tokens)
                 return True
 
             def _remaining():
@@ -408,7 +503,12 @@ class InfoGainLLaDASampler(BaseSampler):
         return (
             x
             if not C["return_dict"]
-            else BaseSamplerOutput(sequences=x, histories=histories)
+            else BaseSamplerOutput(
+                sequences=x, 
+                histories=histories, 
+                info_gain_scores=info_gain_scores,
+                candidate_tokens=candidate_tokens_list
+            )
         )
 
     @staticmethod

@@ -96,10 +96,10 @@ def build_chat_inputs(tokenizer, messages: List[dict], add_generation_prompt: bo
     )
 
 
-def visualize_histories(tokenizer, histories):
+def visualize_histories(tokenizer, histories, info_gain_scores=None, candidate_tokens=None):
     try:
         terminal_visualizer = dllm.utils.TerminalVisualizer(tokenizer=tokenizer)
-        terminal_visualizer.visualize(histories, rich=True)
+        terminal_visualizer.visualize(histories, rich=True, info_gain_scores=info_gain_scores, candidate_tokens=candidate_tokens)
     except Exception as e:
         print(f"(Visualization skipped: {e})")
 
@@ -135,7 +135,12 @@ def single_turn_sampling(sampler, sampler_config, visualize: bool):
         print(DIV + "\n")
 
         if visualize:
-            visualize_histories(tokenizer, outputs.histories)
+            visualize_histories(
+                tokenizer, 
+                outputs.histories, 
+                outputs.info_gain_scores if hasattr(outputs, 'info_gain_scores') else None,
+                outputs.candidate_tokens if hasattr(outputs, 'candidate_tokens') else None
+            )
 
 
 def multi_turn_chat(sampler, sampler_config, visualize: bool):
@@ -169,7 +174,12 @@ def multi_turn_chat(sampler, sampler_config, visualize: bool):
         messages.append({"role": "assistant", "content": reply})
 
         if visualize:
-            visualize_histories(tokenizer, outputs.histories)
+            visualize_histories(
+                tokenizer, 
+                outputs.histories, 
+                outputs.info_gain_scores if hasattr(outputs, 'info_gain_scores') else None,
+                outputs.candidate_tokens if hasattr(outputs, 'candidate_tokens') else None
+            )
 
         render_menu(round_idx)
         choice = prompt_choice()
