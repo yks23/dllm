@@ -58,7 +58,8 @@ def _info_gain_select(
     variant="info_gain",
 ):
     device, T = x.device, x.shape[1]
-    neg = torch.finfo(torch.float32).min
+    # Use dtype-appropriate minimum value to avoid overflow when converting to bfloat16
+    neg = torch.finfo(logits.dtype).min
 
     # Block-restricted mask & base sample
     vbm = mask_index.clone()
@@ -130,10 +131,32 @@ def _info_gain_select(
     def _shift(lg):
         return torch.cat([lg[:, :1], lg[:, :-1]], dim=1) if right_shift_logits else lg
 
-    def _expand_attn(am, n):
+    def _expand_attn(am, n, seq_len=None):
         if am is None or am == "full":
             return am
-        return am.expand(n, *(-1,) * (am.dim() - 1))
+        # Handle sequence length mismatch
+        if seq_len is not None and am.shape[-1] != seq_len:
+            # If sequence length doesn't match, slice or pad attention_mask
+            if am.shape[-1] > seq_len:
+                am = am[..., :seq_len]
+            else:
+                # Pad with False (invalid positions)
+                pad_len = seq_len - am.shape[-1]
+                if am.dim() == 2:
+                    am = torch.cat([am, torch.zeros(am.shape[0], pad_len, dtype=am.dtype, device=am.device)], dim=-1)
+                elif am.dim() == 4:
+                    am = torch.cat([am, torch.zeros(*am.shape[:-1], pad_len, dtype=am.dtype, device=am.device)], dim=-1)
+        # Expand batch dimension
+        if am.dim() == 2:
+            # [B, T] -> [n, T]
+            # Dream model expects 2D attention_mask, it will convert to 4D internally
+            return am.expand(n, -1)
+        elif am.dim() == 4:
+            # [B, H, T, T] -> [n, H, T, T]
+            return am.expand(n, -1, -1, -1)
+        else:
+            # Fallback: expand first dimension
+            return am.expand(n, *(-1,) * (am.dim() - 1))
 
     with torch.no_grad():
         if dual_cache and past_key_values is not None:
@@ -148,10 +171,12 @@ def _info_gain_select(
                 if tok_idx is not None
                 else None
             )
+            xb_slice = xb[:, block_start:block_end]
+            am_slice = _expand_attn(attention_mask, nc, xb_slice.shape[1]) if attention_mask is not None else None
             nl = _shift(
                 model(
-                    xb[:, block_start:block_end],
-                    _expand_attn(attention_mask, nc),
+                    xb_slice,
+                    am_slice,
                     rtk,
                     past_key_values=ep,
                     use_cache=False,
@@ -165,10 +190,12 @@ def _info_gain_select(
             rtk = (
                 tok_idx[:, block_start:].expand(nc, -1) if tok_idx is not None else None
             )
+            xb_slice = xb[:, block_start:]
+            am_slice = _expand_attn(attention_mask, nc, xb_slice.shape[1]) if attention_mask is not None else None
             nl = _shift(
                 model(
-                    xb[:, block_start:],
-                    _expand_attn(attention_mask, nc),
+                    xb_slice,
+                    am_slice,
                     rtk,
                     past_key_values=ep,
                     use_cache=False,
@@ -178,7 +205,26 @@ def _info_gain_select(
             next_logits[:, block_start : block_start + nl.shape[1]] = nl
         else:
             bt = tok_idx.expand(nc, -1) if tok_idx is not None else None
-            nl = _shift(model(xb, _expand_attn(attention_mask, nc), bt).logits)
+            # For Dream model with batch size > 1, we need to handle attention_mask carefully
+            # If attention_mask is 2D and batch size > 1, Dream's scaled_dot_product_attention
+            # may need 4D mask. For now, pass None or "full" when batch size > 1
+            if attention_mask is not None and nc > 1:
+                # When batch size > 1, Dream model may need 4D attention mask
+                # Convert 2D to 4D: [B, T] -> [B, 1, T, T]
+                if attention_mask.dim() == 2:
+                    # Create 4D mask: [nc, 1, T, T]
+                    am_2d = _expand_attn(attention_mask, nc, xb.shape[1])
+                    # Convert to 4D: [nc, T] -> [nc, 1, T, T]
+                    am_4d = torch.logical_and(
+                        am_2d.unsqueeze(1).unsqueeze(-2),
+                        am_2d.unsqueeze(1).unsqueeze(-1),
+                    )
+                    am_expanded = am_4d
+                else:
+                    am_expanded = _expand_attn(attention_mask, nc, xb.shape[1])
+            else:
+                am_expanded = _expand_attn(attention_mask, nc, xb.shape[1]) if attention_mask is not None else None
+            nl = _shift(model(xb, am_expanded, bt).logits)
             next_logits = nl
 
     _, _, scores = score_candidates(
@@ -268,14 +314,15 @@ class InfoGainDreamSampler(BaseSampler):
             st = T - tl
             x[i, st : st + pls[i]] = p
             x[i, st + pls[i] : T] = mtid
-        am = torch.zeros(B, T, dtype=torch.long, device=self.model.device)
+        am = torch.zeros(B, T, dtype=torch.bool, device=self.model.device)
         for j, L in enumerate(sls):
             if L > 0:
-                am[j, -L:] = 1
+                am[j, -L:] = True
         pid = None
-        if torch.any(am == 0):
-            pid = am.long().cumsum(-1) - 1
-            pid.masked_fill_(am == 0, 1)
+        if torch.any(~am):  # Check if any False values
+            am_long = am.long()
+            pid = am_long.cumsum(-1) - 1
+            pid.masked_fill_(~am, 1)
 
         def shift(lg):
             # Suppress EOS and PAD tokens by subtracting 4 from logits
@@ -396,10 +443,10 @@ class InfoGainDreamSampler(BaseSampler):
         is_dual = uc == "dual"
         eps_val = C["eps"]
 
-        if torch.any(am == 0):
+        if torch.any(~am):  # Check if any False values
             cam = torch.logical_and(
-                am.bool().unsqueeze(1).unsqueeze(-2),
-                am.bool().unsqueeze(1).unsqueeze(-1),
+                am.unsqueeze(1).unsqueeze(-2),
+                am.unsqueeze(1).unsqueeze(-1),
             )
             tok_idx = pid
         else:
