@@ -429,6 +429,8 @@ class InfoGainLLaDASampler(BaseSampler):
 
             # ── prefix cache ────────────────────────────────────────────
             if use_cache == "prefix":
+                if eff == 0:
+                    continue
                 o0 = self.model(x, attention_mask=attn, use_cache=True)
                 l0, pkv = prep(o0), o0.past_key_values
                 _step(
@@ -465,6 +467,8 @@ class InfoGainLLaDASampler(BaseSampler):
 
             # ── dual cache ──────────────────────────────────────────────
             if use_cache == "dual":
+                if eff == 0:
+                    continue
                 o0 = self.model(x, attention_mask=attn, use_cache=True)
                 l0, pkv = prep(o0), o0.past_key_values
                 rp = torch.zeros_like(x, dtype=torch.bool)
